@@ -163,56 +163,82 @@ def generate_context_dataset(
     output_path: str
 ):
     """
-    Main loop: Generate -> Filter -> Score -> Save
+    Main loop: Generate -> Filter -> Score -> Save (Streaming w/ Resume)
     """
-    diversity_filter = DiversityFilter(threshold=0.85) # slightly looser to be safe
+    diversity_filter = DiversityFilter(threshold=0.85)
     scorer = QualityScorer(capability)
     
     results = []
-    attempts = 0
-    max_attempts = n_aim * 5 # Stop eventually
     
-    print(f"Starting generation for {capability} ({split}) in context: {context[:30]}...")
-    
-    while len(results) < n_aim and attempts < max_attempts:
-        attempts += 1
-        
-        # 1. Generate
-        prompt, pos, neg = generate_raw_example(capability, context)
-        if not prompt or not pos or not neg:
-            continue
-            
-        full_text_signature = f"{prompt} {pos} {neg}"
-        
-        # 2. Diversity Check
-        if not diversity_filter.is_diverse(full_text_signature):
-            print(f"Skipping duplicate/similar example (Count: {len(results)})")
-            continue
-            
-        # 3. Quality Check
-        score = scorer.score(prompt, pos, neg, context)
-        if score < 3: # Threshold
-            print(f"Skipping low quality example (Score: {score})")
-            continue
-            
-        # Accept
-        diversity_filter.add(full_text_signature)
-        example = CapabilityExample(
-            capability=capability,
-            context=context,
-            split=split,
-            user_prompt=prompt,
-            positive_response=pos,
-            negative_response=neg
-        )
-        results.append(example)
-        if len(results) % 10 == 0:
-            print(f"Collected {len(results)}/{n_aim}")
+    # --- RESUME LOGIC ---
+    if os.path.exists(output_path):
+        print(f"Found existing file: {output_path}. Resuming...")
+        try:
+            with open(output_path, 'r') as f:
+                for line in f:
+                    if not line.strip(): continue
+                    data = json.loads(line)
+                    # reconstruct signature for diversity filter
+                    full_text = f"{data['user_prompt']} {data['positive_response']} {data['negative_response']}"
+                    diversity_filter.add(full_text)
+                    results.append(data)
+            print(f"Resuming with {len(results)} existing examples.")
+        except Exception as e:
+            print(f"Error reading existing file: {e}. Starting fresh.")
+            results = []
 
-    print(f"Finished. Collected {len(results)} examples.")
+    if len(results) >= n_aim:
+        print(f"Target {n_aim} reached. Skipping.")
+        return
+
+    attempts = 0
+    max_attempts = (n_aim - len(results)) * 5 
     
-    # Save
+    print(f"Starting generation for {capability} ({split}). Aiming for {n_aim - len(results)} more...")
+    
+    # Open in APPEND mode for streaming writes
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
-        for item in results:
-            f.write(json.dumps(asdict(item)) + "\n")
+    
+    with open(output_path, 'a') as f_out:
+        while len(results) < n_aim and attempts < max_attempts:
+            attempts += 1
+            
+            # 1. Generate
+            prompt, pos, neg = generate_raw_example(capability, context)
+            if not prompt or not pos or not neg:
+                continue
+                
+            full_text_signature = f"{prompt} {pos} {neg}"
+            
+            # 2. Diversity Check
+            if not diversity_filter.is_diverse(full_text_signature):
+                print(f"Skipping duplicate/similar example (Count: {len(results)})")
+                continue
+                
+            # 3. Quality Check
+            score = scorer.score(prompt, pos, neg, context)
+            if score < 3: # Threshold
+                print(f"Skipping low quality example (Score: {score})")
+                continue
+                
+            # Accept
+            diversity_filter.add(full_text_signature)
+            example = CapabilityExample(
+                capability=capability,
+                context=context,
+                split=split,
+                user_prompt=prompt,
+                positive_response=pos,
+                negative_response=neg
+            )
+            
+            # STREAMING SAVE
+            json_line = json.dumps(asdict(example))
+            f_out.write(json_line + "\n")
+            f_out.flush() # Ensure it hits disk
+            
+            results.append(example)
+            if len(results) % 10 == 0:
+                print(f"Collected {len(results)}/{n_aim}")
+
+    print(f"Finished. Total examples: {len(results)}.")

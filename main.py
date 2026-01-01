@@ -67,22 +67,17 @@ def main():
                 
                 # Train
                 train_path = os.path.join(text_dir, f"{capability}_context{i}_train.jsonl")
-                if not os.path.exists(train_path):
-                    generate_context_dataset(
-                        capability, context, "train", args.n_samples, train_path
-                    )
-                else:
-                    print(f"Skipping {train_path} (exists)")
+                # Always call generate; it handles resuming or skipping if complete
+                generate_context_dataset(
+                    capability, context, "train", args.n_samples, train_path
+                )
                     
                 # Test
                 test_path = os.path.join(text_dir, f"{capability}_context{i}_test.jsonl")
                 n_test = max(50, int(args.n_samples * 0.2)) # 20% or 50
-                if not os.path.exists(test_path):
-                    generate_context_dataset(
-                        capability, context, "test", n_test, test_path
-                    )
-                else:
-                    print(f"Skipping {test_path} (exists)")
+                generate_context_dataset(
+                    capability, context, "test", n_test, test_path
+                )
 
     # 2. Activation Extraction
     if run_all or "extract" in args.steps:
