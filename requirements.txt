@@ -1,0 +1,9 @@
+torch
+transformers
+accelerate
+sentence-transformers
+numpy
+scikit-learn
+matplotlib
+seaborn
+tqdm
