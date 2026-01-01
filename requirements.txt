@@ -8,3 +8,8 @@ matplotlib
 seaborn
 tqdm
 huggingface_hub
+
+# API clients for fast prompt generation (optional)
+groq
+cerebras-cloud-sdk
+openai
