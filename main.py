@@ -6,11 +6,12 @@ from src.dataset_generation import generate_context_dataset
 from src.activation_extraction import ActivationExtractor
 from src.probe_training import train_probes_pipeline
 from src.evaluation import run_evaluation_pipeline
+from src.analysis_geometry import run_geometry_analysis
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Probes Generalization Pipeline")
     parser.add_argument("--steps", nargs="+", default=["all"], 
-                        choices=["generate", "extract", "train", "evaluate", "all"],
+                        choices=["generate", "extract", "train", "evaluate", "analyze", "all"],
                         help="Steps to run")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B-Instruct",
                         help="Model to use for generation and extraction")
@@ -39,6 +40,7 @@ def main():
     activations_dir = os.path.join(data_dir, "activations")
     probes_dir = os.path.join(args.base_dir, "probes")
     results_dir = os.path.join(args.base_dir, "results")
+    geometry_dir = os.path.join(results_dir, "geometry")
     
     import torch
     
@@ -117,6 +119,15 @@ def main():
             activations_dir=activations_dir,
             probes_dir=probes_dir,
             results_dir=results_dir
+        )
+        
+    # 5. Geometric Analysis
+    if run_all or "analyze" in args.steps:
+        print(f"\n=== Step 5: Geometric Analysis (Output: {geometry_dir}) ===")
+        run_geometry_analysis(
+            model_name=args.model,
+            probes_dir=probes_dir,
+            results_dir=geometry_dir
         )
 
 if __name__ == "__main__":
