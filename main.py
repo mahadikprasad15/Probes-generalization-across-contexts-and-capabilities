@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--steps", nargs="+", default=["all"], 
                         choices=["generate", "extract", "train", "evaluate", "all"],
                         help="Steps to run")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct",
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
                         help="Model to use for generation and extraction")
     parser.add_argument("--n_samples", type=int, default=100,
                         help="Number of samples per context")
@@ -20,7 +20,16 @@ def main():
     parser.add_argument("--base_dir", type=str, default=".",
                         help="Base directory for data, probes, and results (e.g. /content/drive/MyDrive/Project)")
     
+    parser.add_argument("--hf_token", type=str, default=None,
+                        help="HuggingFace token for gated models (optional)")
+
     args = parser.parse_args()
+    
+    # HF Authentication
+    if args.hf_token:
+        print("Logging into HuggingFace Hub...")
+        from huggingface_hub import login
+        login(token=args.hf_token)
     
     run_all = "all" in args.steps
     

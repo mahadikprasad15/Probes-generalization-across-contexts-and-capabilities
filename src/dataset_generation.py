@@ -14,7 +14,7 @@ _GEN_MODEL = None
 _GEN_TOKENIZER = None
 _EMBED_MODEL = None
 
-def get_generation_model(model_name: str = "Qwen/Qwen2.5-3B-Instruct"):
+def get_generation_model(model_name: str = "meta-llama/Llama-3.2-3B-Instruct"):
     global _GEN_MODEL, _GEN_TOKENIZER
     if _GEN_MODEL is None:
         print(f"Loading generation model {model_name}...")
