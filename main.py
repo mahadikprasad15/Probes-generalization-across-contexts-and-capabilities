@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--steps", nargs="+", default=["all"], 
                         choices=["generate", "extract", "train", "evaluate", "all"],
                         help="Steps to run")
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B-Instruct",
                         help="Model to use for generation and extraction")
     parser.add_argument("--n_samples", type=int, default=100,
                         help="Number of samples per context")

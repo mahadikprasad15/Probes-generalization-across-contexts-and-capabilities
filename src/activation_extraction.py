@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data_types import CapabilityExample, ProbeActivationExample
 
 class ActivationExtractor:
-    def __init__(self, model_name: str = "meta-llama/Llama-3.2-3B-Instruct", layers: List[int] = None):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.2-1B-Instruct", layers: List[int] = None):
         print(f"Loading extraction model {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         # Ensure padding token is set
