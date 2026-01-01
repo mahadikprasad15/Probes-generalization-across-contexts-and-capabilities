@@ -134,9 +134,13 @@ class ProbeTrainer:
         torch.save(probe_obj, path)
 
 
-def train_probes_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
-    loader = ActivationLoader()
-    trainer = ProbeTrainer()
+def train_probes_pipeline(
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct", 
+    base_dir: str = "data/activations",
+    probes_dir: str = "probes"
+):
+    loader = ActivationLoader(base_dir=base_dir)
+    trainer = ProbeTrainer(output_dir=probes_dir)
     
     # We need to know which layers exist. 
     # We can infer from the file structure or assume standard list.
@@ -161,6 +165,10 @@ def train_probes_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
             
             for l_dir in layer_dirs:
                 layer_idx = int(l_dir.split("_")[1])
+                # Check path existence for safety before loading
+                if not os.path.exists(os.path.join(ctx_dir, l_dir, "train.pt")):
+                   continue
+
                 print(f"Training Context Probe: {capability} | {context[:15]}... | Layer {layer_idx}")
                 
                 X, y = loader.load_data(capability, context, layer_idx, "train")

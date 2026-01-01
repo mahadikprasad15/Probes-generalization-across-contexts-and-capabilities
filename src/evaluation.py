@@ -164,10 +164,15 @@ class Visualizer:
         plt.savefig(os.path.join(self.output_dir, filename))
         plt.close()
 
-def run_evaluation_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
-    loader = ActivationLoader()
+def run_evaluation_pipeline(
+    model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    activations_dir: str = "data/activations",
+    probes_dir: str = "probes",
+    results_dir: str = "results"
+):
+    loader = ActivationLoader(base_dir=activations_dir)
     evaluator = ProbeEvaluator(loader)
-    visualizer = Visualizer()
+    visualizer = Visualizer(output_dir=os.path.join(results_dir, "plots"))
     
     results = []
     
@@ -181,7 +186,7 @@ def run_evaluation_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
         
         # Infer layers from first context
         first_ctx_hash = hashlib.md5(contexts[0].encode()).hexdigest()[:8]
-        layer_dir = os.path.join("data/activations", capability, first_ctx_hash)
+        layer_dir = os.path.join(activations_dir, capability, first_ctx_hash)
         if not os.path.exists(layer_dir):
             print(f"No data for {capability}")
             continue
@@ -191,7 +196,7 @@ def run_evaluation_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
         for layer in layers:
             for context in contexts:
                 ctx_hash = hashlib.md5(context.encode()).hexdigest()[:8]
-                probe_path = os.path.join("probes", "context", model_name, capability, ctx_hash, f"layer_{layer}.pt")
+                probe_path = os.path.join(probes_dir, "context", model_name, capability, ctx_hash, f"layer_{layer}.pt")
                 if not os.path.exists(probe_path): continue
                 
                 probe = torch.load(probe_path)
@@ -200,7 +205,7 @@ def run_evaluation_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
                 results.append(asdict(metrics))
             
             # 2. Generate Heatmap for this layer
-            labels, matrix = evaluator.get_cross_context_matrix(capability, layer, model_name, "probes", split="test")
+            labels, matrix = evaluator.get_cross_context_matrix(capability, layer, model_name, probes_dir, split="test")
             visualizer.plot_heatmap(
                 matrix, labels, 
                 f"{capability} Cross-Context Transfer (Layer {layer})",
@@ -211,6 +216,7 @@ def run_evaluation_pipeline(model_name: str = "Qwen/Qwen2.5-0.5B-Instruct"):
         visualizer.plot_bar_io_comparison(cap_results, f"generalization_{capability}.png")
 
     # Save all raw metrics
-    with open("results/metrics_context.json", "w") as f:
+    os.makedirs(results_dir, exist_ok=True)
+    with open(os.path.join(results_dir, "metrics_context.json"), "w") as f:
         json.dump(results, f, indent=2)
-    print("Evaluation Complete. Results saved to 'results/'")
+    print(f"Evaluation Complete. Results saved to '{results_dir}'")

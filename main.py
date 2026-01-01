@@ -12,18 +12,33 @@ def main():
     parser.add_argument("--steps", nargs="+", default=["all"], 
                         choices=["generate", "extract", "train", "evaluate", "all"],
                         help="Steps to run")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct",
                         help="Model to use for generation and extraction")
-    parser.add_argument("--n_samples", type=int, default=200,
+    parser.add_argument("--n_samples", type=int, default=100,
                         help="Number of samples per context")
+    
+    parser.add_argument("--base_dir", type=str, default=".",
+                        help="Base directory for data, probes, and results (e.g. /content/drive/MyDrive/Project)")
     
     args = parser.parse_args()
     
     run_all = "all" in args.steps
     
+    # Define paths relative to base_dir
+    data_dir = os.path.join(args.base_dir, "data")
+    text_dir = os.path.join(data_dir, "text")
+    activations_dir = os.path.join(data_dir, "activations")
+    probes_dir = os.path.join(args.base_dir, "probes")
+    results_dir = os.path.join(args.base_dir, "results")
+    
+    import torch
+    
     # 1. Dataset Generation
     if run_all or "generate" in args.steps:
-        print("\n=== Step 1: Dataset Generation ===")
+        print(f"\n=== Step 1: Dataset Generation (Output: {text_dir}) ===")
+        # Clear cache before starting
+        torch.cuda.empty_cache()
+
         for capability in CAPABILITIES:
             # For this MVP, we might limit to just 'sycophancy' or run all if defined
             # The CAPABILITIES list in data_types.py has 5 items now.
@@ -40,7 +55,7 @@ def main():
                 # Let's generate TRAIN (200) and TEST (50?)
                 
                 # Train
-                train_path = f"data/text/{capability}_context{i}_train.jsonl"
+                train_path = os.path.join(text_dir, f"{capability}_context{i}_train.jsonl")
                 if not os.path.exists(train_path):
                     generate_context_dataset(
                         capability, context, "train", args.n_samples, train_path
@@ -49,7 +64,7 @@ def main():
                     print(f"Skipping {train_path} (exists)")
                     
                 # Test
-                test_path = f"data/text/{capability}_context{i}_test.jsonl"
+                test_path = os.path.join(text_dir, f"{capability}_context{i}_test.jsonl")
                 n_test = max(50, int(args.n_samples * 0.2)) # 20% or 50
                 if not os.path.exists(test_path):
                     generate_context_dataset(
@@ -60,28 +75,40 @@ def main():
 
     # 2. Activation Extraction
     if run_all or "extract" in args.steps:
-        print("\n=== Step 2: Activation Extraction ===")
+        print(f"\n=== Step 2: Activation Extraction (Input: {text_dir} -> Output: {activations_dir}) ===")
+        # Clear cache from previous step
+        torch.cuda.empty_cache()
         extractor = ActivationExtractor(model_name=args.model)
         
         # Iterate over all generated files in data/text
-        if not os.path.exists("data/text"):
-            print("No data directory found!")
+        if not os.path.exists(text_dir):
+            print(f"No data directory found at {text_dir}!")
         else:
-            files = [f for f in os.listdir("data/text") if f.endswith(".jsonl")]
+            files = [f for f in os.listdir(text_dir) if f.endswith(".jsonl")]
             for f in sorted(files):
-                path = os.path.join("data/text", f)
+                path = os.path.join(text_dir, f)
                 print(f"Extracting from {f}...")
-                extractor.process_file(path, "data/activations")
+                extractor.process_file(path, activations_dir)
 
     # 3. Probe Training
     if run_all or "train" in args.steps:
-        print("\n=== Step 3: Probe Training ===")
-        train_probes_pipeline(model_name=args.model)
+        print(f"\n=== Step 3: Probe Training (Output: {probes_dir}) ===")
+        torch.cuda.empty_cache()
+        train_probes_pipeline(
+            model_name=args.model,
+            base_dir=activations_dir,
+            probes_dir=probes_dir
+        )
 
     # 4. Evaluation
     if run_all or "evaluate" in args.steps:
-        print("\n=== Step 4: Evaluation ===")
-        run_evaluation_pipeline(model_name=args.model)
+        print(f"\n=== Step 4: Evaluation (Output: {results_dir}) ===")
+        run_evaluation_pipeline(
+            model_name=args.model,
+            activations_dir=activations_dir,
+            probes_dir=probes_dir,
+            results_dir=results_dir
+        )
 
 if __name__ == "__main__":
     main()

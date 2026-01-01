@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data_types import CapabilityExample, ProbeActivationExample
 
 class ActivationExtractor:
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-0.5B-Instruct", layers: List[int] = None):
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-3B-Instruct", layers: List[int] = None):
         print(f"Loading extraction model {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         # Ensure padding token is set
@@ -17,7 +17,7 @@ class ActivationExtractor:
             
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype="auto",
+            torch_dtype=torch.float16,
             device_map="auto"
         )
         self.model.eval()
