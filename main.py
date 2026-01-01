@@ -2,7 +2,7 @@ import os
 import argparse
 import hashlib
 from src.data_types import CAPABILITIES, CONTEXTS
-from src.dataset_generation import generate_context_dataset
+from src.dataset_generation import generate_context_dataset, configure_generation_mode
 from src.activation_extraction import ActivationExtractor
 from src.probe_training import train_probes_pipeline
 from src.evaluation import run_evaluation_pipeline
@@ -10,19 +10,30 @@ from src.analysis_geometry import run_geometry_analysis
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Probes Generalization Pipeline")
-    parser.add_argument("--steps", nargs="+", default=["all"], 
+    parser.add_argument("--steps", nargs="+", default=["all"],
                         choices=["generate", "extract", "train", "evaluate", "analyze", "all"],
                         help="Steps to run")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B-Instruct",
-                        help="Model to use for generation and extraction")
+                        help="Model to use for activation extraction (the model being studied)")
     parser.add_argument("--n_samples", type=int, default=100,
                         help="Number of samples per context")
-    
+
     parser.add_argument("--base_dir", type=str, default=".",
                         help="Base directory for data, probes, and results (e.g. /content/drive/MyDrive/Project)")
-    
+
     parser.add_argument("--hf_token", type=str, default=None,
                         help="HuggingFace token for gated models (optional)")
+
+    # API-based generation options (for faster prompt generation)
+    parser.add_argument("--use_api", action="store_true",
+                        help="Use API for prompt generation instead of local model (much faster)")
+    parser.add_argument("--api_provider", type=str, default="groq",
+                        choices=["groq", "cerebras", "openai", "together"],
+                        help="API provider for generation (default: groq)")
+    parser.add_argument("--api_key", type=str, default=None,
+                        help="API key for the provider (optional, can use env var)")
+    parser.add_argument("--api_model", type=str, default=None,
+                        help="Specific model to use with API (optional, uses provider default)")
 
     args = parser.parse_args()
     
@@ -31,7 +42,21 @@ def main():
         print("Logging into HuggingFace Hub...")
         from huggingface_hub import login
         login(token=args.hf_token)
-    
+
+    # Configure generation mode (API vs local)
+    if args.use_api:
+        print(f"\n=== Using API for prompt generation ({args.api_provider}) ===")
+        print("Note: Activation extraction will still use local model for research")
+        configure_generation_mode(
+            use_api=True,
+            api_provider=args.api_provider,
+            api_key=args.api_key,
+            api_model=args.api_model
+        )
+    else:
+        print("\n=== Using local model for prompt generation ===")
+        configure_generation_mode(use_api=False)
+
     run_all = "all" in args.steps
     
     # Define paths relative to base_dir

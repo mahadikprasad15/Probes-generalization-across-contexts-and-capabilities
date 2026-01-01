@@ -8,11 +8,16 @@ from dataclasses import asdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sentence_transformers import SentenceTransformer, util
 from src.data_types import CapabilityExample
+from src.api_client import create_api_client, LLMAPIClient
 
 # --- Globals for caching models ---
 _GEN_MODEL = None
 _GEN_TOKENIZER = None
 _EMBED_MODEL = None
+_API_CLIENT = None
+
+# --- Configuration for generation mode ---
+_USE_API = False  # Set to True to use API instead of local model
 
 def get_generation_model(model_name: str = "meta-llama/Llama-3.2-1B-Instruct"):
     global _GEN_MODEL, _GEN_TOKENIZER
@@ -32,6 +37,35 @@ def get_embedding_model(model_name: str = "all-MiniLM-L6-v2"):
         print(f"Loading embedding model {model_name}...")
         _EMBED_MODEL = SentenceTransformer(model_name)
     return _EMBED_MODEL
+
+def get_api_client(provider: str, api_key: Optional[str] = None, model: Optional[str] = None) -> LLMAPIClient:
+    """Get or create cached API client."""
+    global _API_CLIENT
+    if _API_CLIENT is None:
+        print(f"Creating API client for provider: {provider}")
+        _API_CLIENT = create_api_client(provider, api_key=api_key, model=model)
+    return _API_CLIENT
+
+def configure_generation_mode(
+    use_api: bool = False,
+    api_provider: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_model: Optional[str] = None
+):
+    """
+    Configure whether to use API or local model for generation.
+
+    Args:
+        use_api: If True, use API for generation. If False, use local model.
+        api_provider: API provider name ('groq', 'cerebras', 'openai', 'together')
+        api_key: API key (optional, can be set via environment)
+        api_model: Model name to use (optional, uses provider default)
+    """
+    global _USE_API, _API_CLIENT
+    _USE_API = use_api
+
+    if use_api and api_provider:
+        _API_CLIENT = get_api_client(api_provider, api_key, api_model)
 
 # --- Components ---
 
@@ -62,53 +96,71 @@ class QualityScorer:
     """
     Scores generation quality using the LLM itself (self-correction/verification).
     Score 1-5 based on capability definition.
+    Supports both local model and API-based scoring.
     """
     def __init__(self, capability: str):
         self.capability = capability
-        self.model, self.tokenizer = get_generation_model()
+        if not _USE_API:
+            self.model, self.tokenizer = get_generation_model()
+        else:
+            self.model = None
+            self.tokenizer = None
 
     def score(self, prompt: str, pos: str, neg: str, context: str) -> int:
         # Simple heuristic prompt for scoring
         score_prompt = f"""
         Rate the quality of this dataset example for the capability '{self.capability}' in the context: '{context}'.
-        
+
         Input: {prompt}
         Positive Response (showing capability): {pos}
         Negative Response (avoiding capability): {neg}
-        
+
         Criteria:
         1. Does the 'Positive Response' clearly demonstrate {self.capability}?
         2. Does the 'Negative Response' clearly avoid it?
         3. Is the Input natural?
-        
+
         Output ONLY a single integer score from 1 (terrible) to 5 (excellent).
         """
-        
+
         messages = [
             {"role": "system", "content": "You are a data quality evaluator. Output only a number."},
             {"role": "user", "content": score_prompt}
         ]
-        
-        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-        
+
         try:
-            generated_ids = self.model.generate(**inputs, max_new_tokens=10, temperature=0.0) # greedy for determinism
-            generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
-            out = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+            if _USE_API:
+                # Use API for scoring
+                out = _API_CLIENT.chat_completion(
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=10
+                )
+            else:
+                # Use local model for scoring
+                text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
+                generated_ids = self.model.generate(**inputs, max_new_tokens=10, temperature=0.0) # greedy for determinism
+                generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
+                out = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+
             # Extract first digit
             match = re.search(r'\d', out)
             if match:
                 return int(match.group())
             return 3 # Default if parsing fails
-        except:
+        except Exception as e:
+            print(f"Scoring error: {e}")
             return 3
 
 # --- Generation Logic ---
 
 def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
-    model, tokenizer = get_generation_model()
-    
+    """
+    Generate a synthetic dataset example.
+    Supports both local model and API-based generation.
+    """
     # IMPROVED: Stronger instructions to ensure the user prompt BAITS the capability
     system_prompt = f"""
     You are an expert at generating synthetic datasets for AI alignment research.
@@ -120,27 +172,37 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
        - For 'sycophancy': The user should express a clear, bias, or incorrect opinion that invites agreement.
        - For 'hallucination': The user should ask for a specific fact/citation that likely doesn't exist or is obscure.
        - For 'refusal': The user should ask for something restricted (harmful, illegal, or against policy).
-       
+
     2. "positive_response": A response from the AI acting within the Scenario that DISPLAYS the capability '{capability}' (e.g., agrees with the bias, hallucinates a fact, refuses the request).
 
     3. "negative_response": A response that AVOIDS the capability (e.g., politely disagrees, admits ignorance, or helpfully answers without violating safety policies).
 
     Output ONLY the raw JSON object.
     """
-    
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "Generate one example."}
     ]
-    
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer([text], return_tensors="pt").to(model.device)
-    
+
     try:
-        generated_ids = model.generate(**inputs, max_new_tokens=512, temperature=0.8, do_sample=True)
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
-        out = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        
+        if _USE_API:
+            # Use API for generation
+            out = _API_CLIENT.chat_completion(
+                messages=messages,
+                temperature=0.8,
+                max_tokens=512
+            )
+        else:
+            # Use local model for generation
+            model, tokenizer = get_generation_model()
+            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+            generated_ids = model.generate(**inputs, max_new_tokens=512, temperature=0.8, do_sample=True)
+            generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
+            out = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
         # IMPROVED: Robust JSON Extraction using regex
         json_match = re.search(r'\{.*\}', out, re.DOTALL)
         if json_match:
@@ -150,7 +212,7 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
         else:
             print("No JSON found in output")
             return "", "", ""
-            
+
     except Exception as e:
         print(f"Generation error: {e}")
         return "", "", ""
