@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Dict
 from dataclasses import asdict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sentence_transformers import SentenceTransformer, util
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data_types import CapabilityExample
 from src.api_client import create_api_client, LLMAPIClient
 
@@ -194,11 +195,15 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
             model, tokenizer = get_generation_model()
             text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = tokenizer([text], return_tensors="pt").to(model.device)
-            
+
             generated_ids = model.generate(**inputs, max_new_tokens=512, temperature=0.8, do_sample=True)
             generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
             out = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        
+
+        # STRIP THINKING TAGS (for models like Cerebras that include reasoning)
+        out = re.sub(r'<think>.*?</think>', '', out, flags=re.DOTALL | re.IGNORECASE)
+        out = out.strip()
+
         # TEXT PARSING (Regex)
         # Look for the keys, allowing for some flexibility (case insensitive, extra spaces)
         prompt_match = re.search(r"User Prompt:\s*(.*?)(?=Positive Response:|$)", out, re.DOTALL | re.IGNORECASE)
@@ -224,13 +229,30 @@ def generate_context_dataset(
     context: str,
     split: str,
     n_aim: int,
-    output_path: str
+    output_path: str,
+    enable_quality_check: bool = None,
+    enable_diversity_check: bool = True,
+    batch_size: int = None
 ):
     """
     Main loop: Generate -> Filter -> Score -> Save (Streaming w/ Resume)
+
+    Args:
+        enable_quality_check: Enable quality scoring (makes extra API call per example).
+                             If None, defaults to False when using API, True for local.
+        enable_diversity_check: Enable diversity filtering (local embedding check)
+        batch_size: Number of parallel API calls (only for API mode). Default: 10 for API, 1 for local
     """
-    diversity_filter = DiversityFilter(threshold=0.85)
-    scorer = QualityScorer(capability)
+    # Default quality check: disabled for API (speed), enabled for local (quality)
+    if enable_quality_check is None:
+        enable_quality_check = not _USE_API
+
+    # Default batch size: 10 concurrent for API, 1 for local
+    if batch_size is None:
+        batch_size = 10 if _USE_API else 1
+
+    diversity_filter = DiversityFilter(threshold=0.85) if enable_diversity_check else None
+    scorer = QualityScorer(capability) if enable_quality_check else None
     
     results = []
     
@@ -243,8 +265,9 @@ def generate_context_dataset(
                     if not line.strip(): continue
                     data = json.loads(line)
                     # reconstruct signature for diversity filter
-                    full_text = f"{data['user_prompt']} {data['positive_response']} {data['negative_response']}"
-                    diversity_filter.add(full_text)
+                    if diversity_filter is not None:
+                        full_text = f"{data['user_prompt']} {data['positive_response']} {data['negative_response']}"
+                        diversity_filter.add(full_text)
                     results.append(data)
             print(f"Resuming with {len(results)} existing examples.")
         except Exception as e:
@@ -256,53 +279,128 @@ def generate_context_dataset(
         return
 
     attempts = 0
-    max_attempts = (n_aim - len(results)) * 5 
-    
+    max_attempts = (n_aim - len(results)) * 5
+
+    # Log optimization settings
+    optimizations = []
+    if not enable_quality_check:
+        optimizations.append("quality check disabled (faster)")
+    if not enable_diversity_check:
+        optimizations.append("diversity check disabled (faster)")
+    if batch_size > 1:
+        optimizations.append(f"{batch_size} parallel API calls")
+    if optimizations:
+        print(f"Optimizations: {', '.join(optimizations)}")
+
     print(f"Starting generation for {capability} ({split}). Aiming for {n_aim - len(results)} more...")
-    
+
     # Open in APPEND mode for streaming writes
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     with open(output_path, 'a') as f_out:
-        while len(results) < n_aim and attempts < max_attempts:
-            attempts += 1
-            
-            # 1. Generate
-            prompt, pos, neg = generate_raw_example(capability, context)
-            if not prompt or not pos or not neg:
-                continue
-                
-            full_text_signature = f"{prompt} {pos} {neg}"
-            
-            # 2. Diversity Check
-            if not diversity_filter.is_diverse(full_text_signature):
-                print(f"Skipping duplicate/similar example (Count: {len(results)})")
-                continue
-                
-            # 3. Quality Check
-            score = scorer.score(prompt, pos, neg, context)
-            if score < 3: # Threshold
-                print(f"Skipping low quality example (Score: {score})")
-                continue
-                
-            # Accept
-            diversity_filter.add(full_text_signature)
-            example = CapabilityExample(
-                capability=capability,
-                context=context,
-                split=split,
-                user_prompt=prompt,
-                positive_response=pos,
-                negative_response=neg
-            )
-            
-            # STREAMING SAVE
-            json_line = json.dumps(asdict(example))
-            f_out.write(json_line + "\n")
-            f_out.flush() # Ensure it hits disk
-            
-            results.append(example)
-            if len(results) % 10 == 0:
-                print(f"Collected {len(results)}/{n_aim}")
+        # Use ThreadPoolExecutor for batch generation when batch_size > 1
+        if batch_size > 1 and _USE_API:
+            while len(results) < n_aim and attempts < max_attempts:
+                # Generate batch
+                batch_attempts = min(batch_size, max_attempts - attempts)
+                attempts += batch_attempts
+
+                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                    futures = [executor.submit(generate_raw_example, capability, context)
+                              for _ in range(batch_attempts)]
+
+                    for future in as_completed(futures):
+                        try:
+                            prompt, pos, neg = future.result()
+                            if not prompt or not pos or not neg:
+                                continue
+
+                            full_text_signature = f"{prompt} {pos} {neg}"
+
+                            # 2. Diversity Check
+                            if diversity_filter is not None:
+                                if not diversity_filter.is_diverse(full_text_signature):
+                                    continue
+
+                            # 3. Quality Check
+                            if scorer is not None:
+                                score = scorer.score(prompt, pos, neg, context)
+                                if score < 3:
+                                    continue
+
+                            # Accept
+                            if diversity_filter is not None:
+                                diversity_filter.add(full_text_signature)
+                            example = CapabilityExample(
+                                capability=capability,
+                                context=context,
+                                split=split,
+                                user_prompt=prompt,
+                                positive_response=pos,
+                                negative_response=neg
+                            )
+
+                            # STREAMING SAVE
+                            json_line = json.dumps(asdict(example))
+                            f_out.write(json_line + "\n")
+                            f_out.flush()
+
+                            results.append(example)
+                            if len(results) % 10 == 0:
+                                print(f"Collected {len(results)}/{n_aim}")
+
+                            if len(results) >= n_aim:
+                                break
+                        except Exception as e:
+                            print(f"Batch generation error: {e}")
+                            continue
+
+                if len(results) >= n_aim:
+                    break
+        else:
+            # Sequential generation (local model or batch_size=1)
+            while len(results) < n_aim and attempts < max_attempts:
+                attempts += 1
+
+                # 1. Generate
+                prompt, pos, neg = generate_raw_example(capability, context)
+                if not prompt or not pos or not neg:
+                    continue
+
+                full_text_signature = f"{prompt} {pos} {neg}"
+
+                # 2. Diversity Check
+                if diversity_filter is not None:
+                    if not diversity_filter.is_diverse(full_text_signature):
+                        print(f"Skipping duplicate/similar example (Count: {len(results)})")
+                        continue
+
+                # 3. Quality Check
+                if scorer is not None:
+                    score = scorer.score(prompt, pos, neg, context)
+                    if score < 3: # Threshold
+                        print(f"Skipping low quality example (Score: {score})")
+                        continue
+
+                # Accept
+                if diversity_filter is not None:
+                    diversity_filter.add(full_text_signature)
+                example = CapabilityExample(
+                    capability=capability,
+                    context=context,
+                    split=split,
+                    user_prompt=prompt,
+                    positive_response=pos,
+                    negative_response=neg
+                )
+
+                # STREAMING SAVE
+                json_line = json.dumps(asdict(example))
+                f_out.write(json_line + "\n")
+                f_out.flush() # Ensure it hits disk
+
+                results.append(example)
+                if len(results) % 10 == 0:
+                    print(f"Collected {len(results)}/{n_aim}")
 
     print(f"Finished. Total examples: {len(results)}.")
