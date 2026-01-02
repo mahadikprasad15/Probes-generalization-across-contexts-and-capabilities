@@ -35,6 +35,14 @@ def main():
     parser.add_argument("--api_model", type=str, default=None,
                         help="Specific model to use with API (optional, uses provider default)")
 
+    # Quality/Diversity control for generation speed
+    parser.add_argument("--disable_quality_check", action="store_true",
+                        help="Disable quality scoring (faster, auto-disabled with --use_api)")
+    parser.add_argument("--disable_diversity_check", action="store_true",
+                        help="Disable diversity filtering (faster, may generate similar examples)")
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="Number of concurrent API calls (default: 10 for API, 1 for local)")
+
     args = parser.parse_args()
     
     # HF Authentication
@@ -94,14 +102,20 @@ def main():
                 train_path = os.path.join(text_dir, f"{capability}_context{i}_train.jsonl")
                 # Always call generate; it handles resuming or skipping if complete
                 generate_context_dataset(
-                    capability, context, "train", args.n_samples, train_path
+                    capability, context, "train", args.n_samples, train_path,
+                    enable_quality_check=not args.disable_quality_check if not args.use_api else False,
+                    enable_diversity_check=not args.disable_diversity_check,
+                    batch_size=args.batch_size
                 )
-                    
+
                 # Test
                 test_path = os.path.join(text_dir, f"{capability}_context{i}_test.jsonl")
                 n_test = max(50, int(args.n_samples * 0.2)) # 20% or 50
                 generate_context_dataset(
-                    capability, context, "test", n_test, test_path
+                    capability, context, "test", n_test, test_path,
+                    enable_quality_check=not args.disable_quality_check if not args.use_api else False,
+                    enable_diversity_check=not args.disable_diversity_check,
+                    batch_size=args.batch_size
                 )
 
     # 2. Activation Extraction
