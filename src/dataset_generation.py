@@ -200,8 +200,17 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
             generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
             out = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-        # STRIP THINKING TAGS (for models like Cerebras that include reasoning)
+        # STRIP THINKING/REASONING TAGS (for models that include CoT reasoning)
+        # Handle multiple formats:
+        # - <think>...</think> (common)
+        # - <thinking>...</thinking> (variant)
+        # - <|im_start|>think...<|im_end|> (Qwen format)
+        # - <reasoning>...</reasoning> (another variant)
         out = re.sub(r'<think>.*?</think>', '', out, flags=re.DOTALL | re.IGNORECASE)
+        out = re.sub(r'<thinking>.*?</thinking>', '', out, flags=re.DOTALL | re.IGNORECASE)
+        out = re.sub(r'<reasoning>.*?</reasoning>', '', out, flags=re.DOTALL | re.IGNORECASE)
+        out = re.sub(r'<\|im_start\|>think.*?<\|im_end\|>', '', out, flags=re.DOTALL | re.IGNORECASE)
+        out = re.sub(r'<\|thinking\|>.*?<\|/thinking\|>', '', out, flags=re.DOTALL | re.IGNORECASE)
         out = out.strip()
 
         # TEXT PARSING (Regex)
@@ -217,7 +226,11 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
                 neg_match.group(1).strip()
             )
         else:
-            print(f"Parsing failed. Output start: {out[:100]}...")
+            # Enhanced error logging - show cleaned output (after tag stripping)
+            print(f"Parsing failed. Cleaned output preview:")
+            print(f"  First 200 chars: {out[:200]}...")
+            if len(out) > 200:
+                print(f"  Last 100 chars: ...{out[-100:]}")
             return "", "", ""
             
     except Exception as e:
