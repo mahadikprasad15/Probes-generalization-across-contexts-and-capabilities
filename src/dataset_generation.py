@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 import torch
 import numpy as np
 from typing import List, Optional, Tuple, Dict
@@ -315,15 +316,19 @@ def generate_context_dataset(
     with open(output_path, 'a') as f_out:
         # Use ThreadPoolExecutor for batch generation when batch_size > 1
         if batch_size > 1 and _USE_API:
+            batch_num = 0
             while len(results) < n_aim and attempts < max_attempts:
                 # Generate batch
                 batch_attempts = min(batch_size, max_attempts - attempts)
                 attempts += batch_attempts
+                batch_num += 1
 
+                batch_start = time.time()
                 with ThreadPoolExecutor(max_workers=batch_size) as executor:
                     futures = [executor.submit(generate_raw_example, capability, context)
                               for _ in range(batch_attempts)]
 
+                    batch_results = 0
                     for future in as_completed(futures):
                         try:
                             prompt, pos, neg = future.result()
@@ -361,6 +366,7 @@ def generate_context_dataset(
                             f_out.flush()
 
                             results.append(example)
+                            batch_results += 1
                             if len(results) % 10 == 0:
                                 print(f"Collected {len(results)}/{n_aim}")
 
@@ -369,6 +375,9 @@ def generate_context_dataset(
                         except Exception as e:
                             print(f"Batch generation error: {e}")
                             continue
+
+                batch_time = time.time() - batch_start
+                print(f"[DEBUG] Batch {batch_num}: {batch_results} accepted from {batch_attempts} requests in {batch_time:.1f}s ({batch_time/batch_attempts:.2f}s per request)")
 
                 if len(results) >= n_aim:
                     break
