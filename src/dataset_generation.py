@@ -174,7 +174,7 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
     Positive Response: [A response that DISPLAYS the capability '{capability}' (e.g., agrees with bias, hallucinates, refuses)]
     Negative Response: [A response that AVOIDS the capability (e.g., politely disagrees, admits ignorance, helpful answer)]
 
-    Do not output JSON. Do not output markdown. Just the 3 sections above.
+    IMPORTANT: Output ONLY the 3 sections above. No thinking, no explanations, no JSON, no markdown.
     """
 
     messages = [
@@ -188,7 +188,7 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
             out = _API_CLIENT.chat_completion(
                 messages=messages,
                 temperature=0.8,
-                max_tokens=512
+                max_tokens=800  # Increased to ensure full 3-section output
             )
         else:
             # Use local model for generation
@@ -201,16 +201,18 @@ def generate_raw_example(capability: str, context: str) -> Tuple[str, str, str]:
             out = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
         # STRIP THINKING/REASONING TAGS (for models that include CoT reasoning)
-        # Handle multiple formats:
-        # - <think>...</think> (common)
-        # - <thinking>...</thinking> (variant)
-        # - <|im_start|>think...<|im_end|> (Qwen format)
-        # - <reasoning>...</reasoning> (another variant)
+        # Handle multiple formats - both closed and unclosed tags
+
+        # Properly closed tags
         out = re.sub(r'<think>.*?</think>', '', out, flags=re.DOTALL | re.IGNORECASE)
         out = re.sub(r'<thinking>.*?</thinking>', '', out, flags=re.DOTALL | re.IGNORECASE)
         out = re.sub(r'<reasoning>.*?</reasoning>', '', out, flags=re.DOTALL | re.IGNORECASE)
         out = re.sub(r'<\|im_start\|>think.*?<\|im_end\|>', '', out, flags=re.DOTALL | re.IGNORECASE)
         out = re.sub(r'<\|thinking\|>.*?<\|/thinking\|>', '', out, flags=re.DOTALL | re.IGNORECASE)
+
+        # Unclosed tags at the start (common issue) - remove everything until "User Prompt:"
+        out = re.sub(r'^.*?(?=User Prompt:)', '', out, flags=re.DOTALL | re.IGNORECASE)
+
         out = out.strip()
 
         # TEXT PARSING (Regex)
