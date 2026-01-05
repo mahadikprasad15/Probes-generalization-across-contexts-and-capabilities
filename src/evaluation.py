@@ -14,7 +14,8 @@ from src.data_types import (
     GeneralProbe,
     ContextProbeEval,
     CAPABILITIES, 
-    CONTEXTS
+    CONTEXTS,
+    CONTEXT_LABELS
 )
 from src.probe_training import ActivationLoader
 
@@ -117,9 +118,9 @@ class Visualizer:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def plot_heatmap(self, matrix: np.ndarray, labels: List[str], title: str, filename: str):
-        plt.figure(figsize=(10, 8))
-        # Shorten labels for display
-        short_labels = [l[:20]+"..." for l in labels]
+        plt.figure(figsize=(8, 6)) # Adjusted figsize slightly
+        # Map labels using CONTEXT_LABELS, fallback to truncated
+        short_labels = [CONTEXT_LABELS.get(l, l[:20]+"...") for l in labels]
         
         sns.heatmap(matrix, annot=True, fmt=".2f", cmap="Blues", 
                     xticklabels=short_labels, yticklabels=short_labels)
