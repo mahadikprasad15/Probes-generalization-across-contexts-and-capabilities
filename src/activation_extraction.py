@@ -158,12 +158,19 @@ class ActivationExtractor:
         # Collect from hooks
         # self.activations[layer_idx] is [batch, seq_len, dim]
         
+        # inputs are on GPU, so attention_mask is on GPU.
         attention_mask = inputs.attention_mask
-        last_token_indices = attention_mask.sum(dim=1) - 1
+        # Calculate indices on GPU for speed, then move to CPU for indexing the CPU tensor
+        last_token_indices = (attention_mask.sum(dim=1) - 1).cpu()
         
         for layer_idx, hidden_state in self.activations.items():
+            # hidden_state is already on CPU (from hook)
+            
+            # Use arange on CPU as well
             batch_size = hidden_state.shape[0]
-            last_token_acts = hidden_state[torch.arange(batch_size), last_token_indices, :]
+            batch_indices = torch.arange(batch_size, device="cpu")
+            
+            last_token_acts = hidden_state[batch_indices, last_token_indices, :]
             
             # Move to CPU numpy
             last_token_acts_np = last_token_acts.cpu().numpy()
