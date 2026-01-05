@@ -47,7 +47,7 @@ class GeometryAnalyzer:
             probe_path = os.path.join(self.probes_dir, "context", model_name, capability, ctx_hash, f"layer_{layer}.pt")
             
             if os.path.exists(probe_path):
-                probe: ContextSpecificProbe = torch.load(probe_path)
+                probe: ContextSpecificProbe = torch.load(probe_path, weights_only=False)
                 weights.append(probe.W)
                 loaded_contexts.append(context)
         

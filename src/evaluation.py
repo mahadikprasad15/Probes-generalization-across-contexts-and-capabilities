@@ -100,7 +100,8 @@ class ProbeEvaluator:
                 print(f"Probe missing for {train_ctx[:10]} at layer {layer}")
                 continue
                 
-            probe: ContextSpecificProbe = torch.load(probe_path)
+            # Load probe
+            probe: ContextSpecificProbe = torch.load(probe_path, weights_only=False)
             
             # Eval on all cols
             for j, test_ctx in enumerate(contexts):
@@ -197,9 +198,7 @@ def run_evaluation_pipeline(
             for context in contexts:
                 ctx_hash = hashlib.md5(context.encode()).hexdigest()[:8]
                 probe_path = os.path.join(probes_dir, "context", model_name, capability, ctx_hash, f"layer_{layer}.pt")
-                if not os.path.exists(probe_path): continue
-                
-                probe = torch.load(probe_path)
+                probe = torch.load(probe_path, weights_only=False)
                 metrics = evaluator.evaluate_context_probe(probe, split="test")
                 cap_results.append(metrics)
                 results.append(asdict(metrics))
