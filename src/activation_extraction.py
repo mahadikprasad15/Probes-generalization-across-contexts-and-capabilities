@@ -69,7 +69,7 @@ class ActivationExtractor:
         ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False)
 
-    def process_file(self, jsonl_path: str, output_base_dir: str):
+    def process_file(self, jsonl_path: str, output_base_dir: str, batch_size: int = 32):
         """
         Reads a JSONL of CapabilityExamples, runs inference, and saves activations.
         """
@@ -82,56 +82,79 @@ class ActivationExtractor:
             for line in f:
                 examples.append(json.loads(line))
         
-        print(f"Processing {len(examples)} examples from {jsonl_path}")
-        
-        # We will collect all activations first, then save them grouped by context/layer?
-        # Or save one big list of objects?
-        # The spec implies separating by layer might be useful, but our dataclass has 'layer' field.
-        # Let's create a list of ProbeActivationExample objects.
+        print(f"Processing {len(examples)} examples from {jsonl_path} with batch_size={batch_size}")
         
         results = []
         
-        for ex_dict in tqdm(examples):
-            # Parse dict back to object if needed, or just use dict fields
-            capability = ex_dict['capability']
-            context = ex_dict['context']
-            split = ex_dict['split']
-            prompt = ex_dict['user_prompt']
+        # Process in batches
+        for i in tqdm(range(0, len(examples), batch_size)):
+            batch_examples = examples[i:i + batch_size]
+            
+            # Prepare batch data
+            pos_texts = []
+            neg_texts = []
+            metadata_batch = []
+            
+            for ex_dict in batch_examples:
+                prompt = ex_dict['user_prompt']
+                pos_texts.append(self._get_input_text(prompt, ex_dict['positive_response']))
+                neg_texts.append(self._get_input_text(prompt, ex_dict['negative_response']))
+                
+                metadata_batch.append({
+                    'capability': ex_dict['capability'],
+                    'context': ex_dict['context'],
+                    'split': ex_dict['split']
+                })
             
             # 1. Positive Run
-            pos_text = self._get_input_text(prompt, ex_dict['positive_response'])
-            self._run_inference(pos_text, capability, context, split, 1, results)
+            self._run_inference_batch(pos_texts, metadata_batch, 1, results)
             
             # 2. Negative Run
-            neg_text = self._get_input_text(prompt, ex_dict['negative_response'])
-            self._run_inference(neg_text, capability, context, split, 0, results)
-        
-        # Save results
-        # To avoid massive files, maybe save one file per layer per split?
-        # Structure: output_base_dir / capability / context / split / layer_idx.pt
+            self._run_inference_batch(neg_texts, metadata_batch, 0, results)
         
         self._save_results(results, output_base_dir)
 
-    def _run_inference(self, text, capability, context, split, label, results_list):
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+    def _run_inference_batch(self, texts: List[str], metadata_batch: List[Dict], label: int, results_list: List):
+        # Tokenize with padding
+        inputs = self.tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(self.model.device)
         self.activations = {} # Clear previous
         
         with torch.no_grad():
             self.model(**inputs)
             
         # Collect from hooks
+        # self.activations[layer_idx] is [batch, seq_len, dim]
+        
+        # To get the correct last token, we need attention_mask
+        # Mask is [batch, seq_len], 1 for token, 0 for pad.
+        # Last token index = sum(mask) - 1 (for 0-indexed)
+        attention_mask = inputs.attention_mask
+        last_token_indices = attention_mask.sum(dim=1) - 1
+        
         for layer_idx, hidden_state in self.activations.items():
-            # hidden_state is [1, seq_len, dim]. Get last token -> [dim]
-            last_token_act = hidden_state[0, -1, :].numpy()
+            # Move entire batch to CPU first? Or process on GPU then move?
+            # Processing on GPU is faster for indexing
             
-            results_list.append(ProbeActivationExample(
-                capability=capability,
-                context=context,
-                split=split,
-                label=label,
-                layer=layer_idx,
-                activation=last_token_act
-            ))
+            # hidden_state: [batch, seq_len, dim]
+            # Gather the last token for each sequence in the batch
+            # Advanced indexing: [arange(batch), last_token_indices, :]
+            batch_size = hidden_state.shape[0]
+            last_token_acts = hidden_state[torch.arange(batch_size), last_token_indices, :]
+            
+            # Move to CPU numpy
+            last_token_acts_np = last_token_acts.cpu().numpy()
+            
+            # Append to results
+            for i, activation in enumerate(last_token_acts_np):
+                meta = metadata_batch[i]
+                results_list.append(ProbeActivationExample(
+                    capability=meta['capability'],
+                    context=meta['context'],
+                    split=meta['split'],
+                    label=label,
+                    layer=layer_idx,
+                    activation=activation
+                ))
 
     def _save_results(self, results: List[ProbeActivationExample], base_dir: str):
         # Group by layer to save organized files

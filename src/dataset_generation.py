@@ -251,13 +251,8 @@ def generate_context_dataset(
     batch_size: int = None
 ):
     """
-    Main loop: Generate -> Filter -> Score -> Save (Streaming w/ Resume)
-
-    Args:
-        enable_quality_check: Enable quality scoring (makes extra API call per example).
-                             If None, defaults to False when using API, True for local.
-        enable_diversity_check: Enable diversity filtering (local embedding check)
-        batch_size: Number of parallel API calls (only for API mode). Default: 10 for API, 1 for local
+    Main loop: Generate Batch -> Filter -> Score Batch -> Save
+    Optimized for API parallelization.
     """
     # Default quality check: disabled for API (speed), enabled for local (quality)
     if enable_quality_check is None:
@@ -294,9 +289,10 @@ def generate_context_dataset(
         print(f"Target {n_aim} reached. Skipping.")
         return
 
-    attempts = 0
-    max_attempts = (n_aim - len(results)) * 5
-
+    # Allow for some rejected samples (e.g. 5x oversampling factor)
+    max_attempts = (n_aim - len(results)) * 10
+    total_generated = 0
+    
     # Log optimization settings
     optimizations = []
     if not enable_quality_check:
@@ -314,117 +310,121 @@ def generate_context_dataset(
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     with open(output_path, 'a') as f_out:
-        # Use ThreadPoolExecutor for batch generation when batch_size > 1
-        if batch_size > 1 and _USE_API:
-            batch_num = 0
-            while len(results) < n_aim and attempts < max_attempts:
-                # Generate batch
-                batch_attempts = min(batch_size, max_attempts - attempts)
-                attempts += batch_attempts
-                batch_num += 1
-
-                batch_start = time.time()
+        batch_num = 0
+        
+        while len(results) < n_aim and total_generated < max_attempts:
+            batch_num += 1
+            current_batch = batch_size
+            
+            # PHASE 1: PARALLEL GENERATION
+            # ----------------------------
+            gen_start = time.time()
+            candidates = [] # List[(prompt, pos, neg)]
+            
+            if batch_size > 1 and _USE_API:
                 with ThreadPoolExecutor(max_workers=batch_size) as executor:
-                    futures = [executor.submit(generate_raw_example, capability, context)
-                              for _ in range(batch_attempts)]
-
-                    batch_results = 0
+                    futures = [executor.submit(generate_raw_example, capability, context) 
+                               for _ in range(current_batch)]
                     for future in as_completed(futures):
                         try:
-                            prompt, pos, neg = future.result()
-                            if not prompt or not pos or not neg:
-                                continue
-
-                            full_text_signature = f"{prompt} {pos} {neg}"
-
-                            # 2. Diversity Check
-                            if diversity_filter is not None:
-                                if not diversity_filter.is_diverse(full_text_signature):
-                                    continue
-
-                            # 3. Quality Check
-                            if scorer is not None:
-                                score = scorer.score(prompt, pos, neg, context)
-                                if score < 3:
-                                    continue
-
-                            # Accept
-                            if diversity_filter is not None:
-                                diversity_filter.add(full_text_signature)
-                            example = CapabilityExample(
-                                capability=capability,
-                                context=context,
-                                split=split,
-                                user_prompt=prompt,
-                                positive_response=pos,
-                                negative_response=neg
-                            )
-
-                            # STREAMING SAVE
-                            json_line = json.dumps(asdict(example))
-                            f_out.write(json_line + "\n")
-                            f_out.flush()
-
-                            results.append(example)
-                            batch_results += 1
-                            if len(results) % 10 == 0:
-                                print(f"Collected {len(results)}/{n_aim}")
-
-                            if len(results) >= n_aim:
-                                break
+                            p, pos, neg = future.result()
+                            if p and pos and neg:
+                                candidates.append((p, pos, neg))
                         except Exception as e:
-                            print(f"Batch generation error: {e}")
-                            continue
+                            print(f"Gen error: {e}")
+            else:
+                # Sequential
+                for _ in range(current_batch):
+                    p, pos, neg = generate_raw_example(capability, context)
+                    if p and pos and neg:
+                        candidates.append((p, pos, neg))
+            
+            total_generated += current_batch
+            gen_time = time.time() - gen_start
+            
+            if not candidates:
+                print(f"[Batch {batch_num}] 0 candidates generated. Retrying...")
+                continue
 
-                batch_time = time.time() - batch_start
-                print(f"[DEBUG] Batch {batch_num}: {batch_results} accepted from {batch_attempts} requests in {batch_time:.1f}s ({batch_time/batch_attempts:.2f}s per request)")
+            # PHASE 2: DIVERSITY FILTERING (Local)
+            # ------------------------------------
+            unique_candidates = []
+            if diversity_filter:
+                for cand in candidates:
+                    sig = f"{cand[0]} {cand[1]} {cand[2]}"
+                    if diversity_filter.is_diverse(sig):
+                        # Don't add to filter yet, wait until accepted? 
+                        # Better to prevent intra-batch duplicates now:
+                        unique_candidates.append(cand)
+                        diversity_filter.add(sig)
+            else:
+                unique_candidates = candidates
+                
+            if not unique_candidates:
+                print(f"[Batch {batch_num}] All {len(candidates)} candidates failed diversity check.")
+                continue
 
-                if len(results) >= n_aim:
+            # PHASE 3: PARALLEL SCORING
+            # -------------------------
+            accepted_candidates = []
+            score_start = time.time()
+            
+            if scorer and unique_candidates:
+                # We can reuse the thread pool concept for scoring
+                # Score all unique candidates in parallel
+                scores = []
+                if batch_size > 1 and _USE_API:
+                    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                        future_to_cand = {
+                            executor.submit(scorer.score, c[0], c[1], c[2], context): c 
+                            for c in unique_candidates
+                        }
+                        for future in as_completed(future_to_cand):
+                            cand = future_to_cand[future]
+                            try:
+                                s = future.result()
+                                if s >= 3:
+                                    accepted_candidates.append(cand)
+                            except Exception as e:
+                                print(f"Score error: {e}")
+                else:
+                    for cand in unique_candidates:
+                        s = scorer.score(cand[0], cand[1], cand[2], context)
+                        if s >= 3:
+                            accepted_candidates.append(cand)
+            else:
+                # No scorer or no candidates
+                accepted_candidates = unique_candidates
+
+            score_time = time.time() - score_start
+
+            # PHASE 4: SAVING
+            # ---------------
+            for p, pos, neg in accepted_candidates:
+                if len(results) >= n_aim: 
                     break
-        else:
-            # Sequential generation (local model or batch_size=1)
-            while len(results) < n_aim and attempts < max_attempts:
-                attempts += 1
-
-                # 1. Generate
-                prompt, pos, neg = generate_raw_example(capability, context)
-                if not prompt or not pos or not neg:
-                    continue
-
-                full_text_signature = f"{prompt} {pos} {neg}"
-
-                # 2. Diversity Check
-                if diversity_filter is not None:
-                    if not diversity_filter.is_diverse(full_text_signature):
-                        print(f"Skipping duplicate/similar example (Count: {len(results)})")
-                        continue
-
-                # 3. Quality Check
-                if scorer is not None:
-                    score = scorer.score(prompt, pos, neg, context)
-                    if score < 3: # Threshold
-                        print(f"Skipping low quality example (Score: {score})")
-                        continue
-
-                # Accept
-                if diversity_filter is not None:
-                    diversity_filter.add(full_text_signature)
+                    
                 example = CapabilityExample(
                     capability=capability,
                     context=context,
                     split=split,
-                    user_prompt=prompt,
+                    user_prompt=p,
                     positive_response=pos,
                     negative_response=neg
                 )
-
-                # STREAMING SAVE
+                
                 json_line = json.dumps(asdict(example))
                 f_out.write(json_line + "\n")
-                f_out.flush() # Ensure it hits disk
-
                 results.append(example)
-                if len(results) % 10 == 0:
-                    print(f"Collected {len(results)}/{n_aim}")
+                
+            f_out.flush()
+            
+            # Stats
+            total_time = gen_time + score_time
+            print(f"[Batch {batch_num}] +{len(accepted_candidates)} samples. "
+                  f"(Gen: {len(candidates)}/{current_batch} in {gen_time:.1f}s, "
+                  f"Filter: {len(unique_candidates)}, "
+                  f"Score: {len(accepted_candidates)} in {score_time:.1f}s). "
+                  f"Total: {len(results)}/{n_aim}")
 
     print(f"Finished. Total examples: {len(results)}.")
