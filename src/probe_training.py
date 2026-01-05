@@ -47,7 +47,7 @@ class ActivationLoader:
             print(f"Warning: Data not found at {file_path}")
             return np.array([]), np.array([])
             
-        examples: List[ProbeActivationExample] = torch.load(file_path)
+        examples: List[ProbeActivationExample] = torch.load(file_path, weights_only=False)
         
         X = np.stack([ex.activation for ex in examples])
         y = np.array([ex.label for ex in examples])
