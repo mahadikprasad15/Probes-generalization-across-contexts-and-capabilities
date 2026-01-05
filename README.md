@@ -2,6 +2,8 @@
 
 This project implements an end-to-end pipeline for studying how Large Language Models (LLMs) represent high-level behavioral capabilities (like **sycophancy**, **hallucination**, and **persuasion**) across different textual contexts.
 
+This is based on a paper that explores the cross-context and cross-capability generalization of probes. There is an additional Base + Adjustment hypothesis tested in this.
+
 Does an LLM use the same internal "direction" to represent sycophancy in a political context vs. a medical context? Can we train a probe on one and generalized to the other? This repository provides the tools to answer these questions.
 
 ## Key Features
