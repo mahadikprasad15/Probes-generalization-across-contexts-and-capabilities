@@ -130,15 +130,15 @@ def main():
             print(f"No data directory found at {text_dir}!")
         else:
             files = [f for f in os.listdir(text_dir) if f.endswith(".jsonl")]
+            files_to_process = []
             for f in sorted(files):
                 path = os.path.join(text_dir, f)
-                print(f"Extracting from {f}...")
-                # Use batch_size from args, default to 32 if not set (since args.batch_size default is None? No, lets check args default)
-                # args.batch_size default is None. 
-                # If None, process_file will use its own default (32 in my implementation).
-                # But if user passed something via CLI, we should use it.
+                files_to_process.append(path)
+            
+            if files_to_process:
+                print(f"Found {len(files_to_process)} dataset files. Processing internally as one batch job...")
                 bs = args.batch_size if args.batch_size is not None else 32
-                extractor.process_file(path, activations_dir, batch_size=bs)
+                extractor.process_files(files_to_process, activations_dir, batch_size=bs)
 
     # 3. Probe Training
     if run_all or "train" in args.steps:

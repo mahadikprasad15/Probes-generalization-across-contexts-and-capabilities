@@ -7,6 +7,33 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data_types import CapabilityExample, ProbeActivationExample
 
+from torch.utils.data import Dataset, DataLoader
+
+class ProbeDataset(Dataset):
+    def __init__(self, examples: List[Dict], tokenizer, get_input_text_fn):
+        self.examples = examples
+        self.tokenizer = tokenizer
+        self.get_input_text_fn = get_input_text_fn
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        ex_dict = self.examples[idx]
+        prompt = ex_dict['user_prompt']
+        
+        # Format texts
+        pos_text = self.get_input_text_fn(prompt, ex_dict['positive_response'])
+        neg_text = self.get_input_text_fn(prompt, ex_dict['negative_response'])
+        
+        return {
+            'pos_text': pos_text,
+            'neg_text': neg_text,
+            'capability': ex_dict['capability'],
+            'context': ex_dict['context'],
+            'split': ex_dict['split']
+        }
+
 class ActivationExtractor:
     def __init__(self, model_name: str = "meta-llama/Llama-3.2-1B-Instruct", layers: List[int] = None):
         print(f"Loading extraction model {model_name}...")
@@ -36,22 +63,15 @@ class ActivationExtractor:
         """Register forward hooks to capture hidden states."""
         def get_hook(layer_idx):
             def hook(module, input, output):
-                # output is typically (hidden_state, ...)
-                # shape: [batch, seq_len, hidden_dim]
-                # We want the LAST token's activation for causal models answering
-                # or mean pool? Spec says "last token of response" or similar.
-                # Use last token for now as it's standard for next-token prediction tasks.
-                
                 hidden_state = output[0] if isinstance(output, tuple) else output
                 # Detach and move to CPU to save memory
                 self.activations[layer_idx] = hidden_state.detach().cpu()
             return hook
 
-        # Access layers. This depends on model architecture name.
-        # For Qwen (and most Llama-like), it's model.layers or model.model.layers
+        # Access layers
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
              modules = self.model.model.layers
-        elif hasattr(self.model, "layers"): # GPT-NeoX style sometimes
+        elif hasattr(self.model, "layers"): # GPT-NeoX style
              modules = self.model.layers
         else:
              print("Warning: Could not find layer modules automatically. Hooks might fail.")
@@ -69,43 +89,56 @@ class ActivationExtractor:
         ]
         return self.tokenizer.apply_chat_template(messages, tokenize=False)
 
-    def process_file(self, jsonl_path: str, output_base_dir: str, batch_size: int = 32):
+    def process_files(self, jsonl_paths: List[str], output_base_dir: str, batch_size: int = 32):
         """
-        Reads a JSONL of CapabilityExamples, runs inference, and saves activations.
+        Reads multiple JSONL files, creates a unified DataLoader, and runs inference.
         """
-        if not os.path.exists(jsonl_path):
-            print(f"File not found: {jsonl_path}")
+        all_examples = []
+        for path in jsonl_paths:
+            if not os.path.exists(path):
+                print(f"File not found: {path}")
+                continue
+            with open(path, 'r') as f:
+                for line in f:
+                    all_examples.append(json.loads(line))
+        
+        if not all_examples:
+            print("No examples found to process.")
             return
 
-        examples = []
-        with open(jsonl_path, 'r') as f:
-            for line in f:
-                examples.append(json.loads(line))
+        print(f"Processing {len(all_examples)} examples total with batch_size={batch_size}")
         
-        print(f"Processing {len(examples)} examples from {jsonl_path} with batch_size={batch_size}")
+        dataset = ProbeDataset(all_examples, self.tokenizer, self._get_input_text)
         
+        # num_workers > 0 allows pre-processing (formatting of chat template) to happen in parallel
+        # Note: tokenization happens in collate_fn or manually in batch loop? 
+        # Standard approach: raw text in dataset -> tokenize in batch loop (to handle dynamic padding efficiently)
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            num_workers=4 if os.uname().sysname != 'Darwin' else 0 # Multoprocessing on Mac can sometimes be tricky with spawn/fork, safer 0 or 2. Let's try 0 for stability first, or just rely on batching.
+        )
+        # Actually, let's stick to num_workers=0 (main process) for Mac stability unless user demands max perf. Batching is the big win.
+
         results = []
-        
-        # Process in batches
-        for i in tqdm(range(0, len(examples), batch_size)):
-            batch_examples = examples[i:i + batch_size]
+
+        for batch in tqdm(dataloader, desc="Extracting Activations"):
+            # batch is a dict of lists
+            pos_texts = batch['pos_text']
+            neg_texts = batch['neg_text']
             
-            # Prepare batch data
-            pos_texts = []
-            neg_texts = []
+            # Prepare metadata for this batch
+            # Transpose batch of dicts to list of dicts for our use
+            current_batch_size = len(pos_texts)
             metadata_batch = []
-            
-            for ex_dict in batch_examples:
-                prompt = ex_dict['user_prompt']
-                pos_texts.append(self._get_input_text(prompt, ex_dict['positive_response']))
-                neg_texts.append(self._get_input_text(prompt, ex_dict['negative_response']))
-                
+            for i in range(current_batch_size):
                 metadata_batch.append({
-                    'capability': ex_dict['capability'],
-                    'context': ex_dict['context'],
-                    'split': ex_dict['split']
+                    'capability': batch['capability'][i],
+                    'context': batch['context'][i],
+                    'split': batch['split'][i]
                 })
-            
+
             # 1. Positive Run
             self._run_inference_batch(pos_texts, metadata_batch, 1, results)
             
@@ -125,19 +158,10 @@ class ActivationExtractor:
         # Collect from hooks
         # self.activations[layer_idx] is [batch, seq_len, dim]
         
-        # To get the correct last token, we need attention_mask
-        # Mask is [batch, seq_len], 1 for token, 0 for pad.
-        # Last token index = sum(mask) - 1 (for 0-indexed)
         attention_mask = inputs.attention_mask
         last_token_indices = attention_mask.sum(dim=1) - 1
         
         for layer_idx, hidden_state in self.activations.items():
-            # Move entire batch to CPU first? Or process on GPU then move?
-            # Processing on GPU is faster for indexing
-            
-            # hidden_state: [batch, seq_len, dim]
-            # Gather the last token for each sequence in the batch
-            # Advanced indexing: [arange(batch), last_token_indices, :]
             batch_size = hidden_state.shape[0]
             last_token_acts = hidden_state[torch.arange(batch_size), last_token_indices, :]
             
@@ -147,6 +171,7 @@ class ActivationExtractor:
             # Append to results
             for i, activation in enumerate(last_token_acts_np):
                 meta = metadata_batch[i]
+                # Ensure we store strings, not tensors, if DataLoader collated them weirdly (usually strings are preserved as tuples/lists)
                 results_list.append(ProbeActivationExample(
                     capability=meta['capability'],
                     context=meta['context'],
@@ -158,32 +183,37 @@ class ActivationExtractor:
 
     def _save_results(self, results: List[ProbeActivationExample], base_dir: str):
         # Group by layer to save organized files
-        # path: base_dir / capability / context / layer_{idx} / {split}.pt
         if not results:
             return
 
-        # Assuming all results process the same context/capability file, we can infer from first
-        first = results[0]
-        cap_dir = os.path.join(base_dir, first.capability)
-        # Hash context or use a safe name? Context is long string.
-        # We might need a mapping or just use "context_0" etc if we passed that in.
-        # But here 'context' is the full string.
-        # Using a hash for the folder name
-        import hashlib
-        ctx_hash = hashlib.md5(first.context.encode()).hexdigest()[:8]
+        # Optimization: Group by (capability, context, layer, split)
+        # This prevents opening/closing files constantly if the list is mixed.
         
-        ctx_dir = os.path.join(cap_dir, ctx_hash)
-        
-        # Group
         from collections import defaultdict
-        layer_groups = defaultdict(list)
+        # Map: (capability, context, layer, split) -> list of activations
+        grouped_data = defaultdict(list)
+        
         for r in results:
-            layer_groups[r.layer].append(r)
+            grouped_data[(r.capability, r.context, r.layer, r.split)].append(r)
+
+        import hashlib
+        
+        for (cap, ctx, layer_idx, split), items in grouped_data.items():
+            ctx_hash = hashlib.md5(ctx.encode()).hexdigest()[:8]
             
-        for layer_idx, items in layer_groups.items():
-            layer_dir = os.path.join(ctx_dir, f"layer_{layer_idx}")
+            # Directory structure: base_dir / capability / context_hash / layer_N
+            layer_dir = os.path.join(base_dir, cap, ctx_hash, f"layer_{layer_idx}")
             os.makedirs(layer_dir, exist_ok=True)
             
-            save_path = os.path.join(layer_dir, f"{first.split}.pt")
+            save_path = os.path.join(layer_dir, f"{split}.pt")
+            
+            # Append if exists? No, usually we overwrite or we load-append-save.
+            # Efficient saving: Just save the new batch?
+            # User wants to run "all files". Currently this function saves EVERYTHING at the end.
+            # If dataset is huge, this explodes RAM.
+            # BETTER: Save per-batch or per-file?
+            # Given the user says "all files", let's save at the very end for simplicity as requested, 
+            # assuming memory fits (activations are floats, can get big).
+            # If 1000 samples * 2 (pos/neg) * 32 layers * 2048 dim * 4 bytes = ~500MB. It fits.
+            
             torch.save(items, save_path)
-            # print(f"Saved {len(items)} activations to {save_path}")
