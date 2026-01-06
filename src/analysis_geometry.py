@@ -24,6 +24,7 @@ class GeometryStats:
     norm_ratio: float
     explained_variance: List[float] # PCA explained variance ratios
     effective_rank_90: int # Number of components to explain 90% variance
+    avg_pairwise_similarity: float # Average cosine similarity between all pairs of context probes
 
 class GeometryAnalyzer:
     def __init__(self, probes_dir: str = "probes", results_dir: str = "results/geometry"):
@@ -83,8 +84,19 @@ class GeometryAnalyzer:
         explained_var = pca.explained_variance_ratio_
         cumulative_var = np.cumsum(explained_var)
         effective_rank = np.searchsorted(cumulative_var, 0.90) + 1
+
+        # 5. Cosine Similarity Analysis (Subspace Analysis)
+        # Compute cosine similarity between all pairs of original probe vectors
+        sim_matrix = cosine_similarity(W)
+        # Exclude diagonal (self-similarity = 1.0)
+        # Since matrix is symmetric, we can take upper triangle
+        upper_indices = np.triu_indices_from(sim_matrix, k=1)
+        if len(upper_indices[0]) > 0:
+            avg_similarity = np.mean(sim_matrix[upper_indices])
+        else:
+            avg_similarity = 0.0
         
-        # 5. Visualizations
+        # 6. Visualizations
         self._plot_scree(explained_var, capability, layer)
         self._plot_residual_similarity(Residuals, contexts, capability, layer)
         self._plot_norm_comparison(base_norm, res_norms, contexts, capability, layer)
@@ -96,7 +108,8 @@ class GeometryAnalyzer:
             mean_residual_norm=float(mean_res_norm),
             norm_ratio=float(ratio),
             explained_variance=explained_var.tolist(),
-            effective_rank_90=int(effective_rank)
+            effective_rank_90=int(effective_rank),
+            avg_pairwise_similarity=float(avg_similarity)
         )
 
     def _plot_scree(self, explained_var, capability, layer):
@@ -140,6 +153,34 @@ class GeometryAnalyzer:
         plt.savefig(os.path.join(self.results_dir, f"norms_{capability}_layer{layer}.png"))
         plt.close()
 
+    def plot_similarity_trend(self, stats_list: List[GeometryStats]):
+        """Plots the trend of average cosine similarity across layers for each capability."""
+        # Organize by capability
+        data: Dict[str, Dict[int, float]] = {cap: {} for cap in CAPABILITIES}
+        
+        for s in stats_list:
+            if s.capability in data:
+                data[s.capability][s.layer] = s.avg_pairwise_similarity
+        
+        plt.figure(figsize=(10, 6))
+        for cap in CAPABILITIES:
+            dict_data = data.get(cap, {})
+            if not dict_data: continue
+            
+            layers = sorted(dict_data.keys())
+            sims = [dict_data[l] for l in layers]
+            
+            plt.plot(layers, sims, marker='o', label=cap)
+            
+        plt.xlabel("Layer")
+        plt.ylabel("Avg Cosine Similarity")
+        plt.title("Probe Direction Similarity Across Contexts vs Depth")
+        plt.legend()
+        plt.grid(True)
+        plt.ylim(-0.1, 1.1) # Cosine similarity range
+        plt.savefig(os.path.join(self.results_dir, "similarity_trend_all.png"))
+        plt.close()
+
 def run_geometry_analysis(
     model_name: str = "meta-llama/Llama-3.2-1B-Instruct",
     probes_dir: str = "probes",
@@ -147,6 +188,7 @@ def run_geometry_analysis(
 ):
     analyzer = GeometryAnalyzer(probes_dir=probes_dir, results_dir=results_dir)
     stats_list = []
+    from dataclasses import asdict
     
     for capability in CAPABILITIES:
         print(f"Analyzing geometry for {capability}...")
@@ -168,11 +210,16 @@ def run_geometry_analysis(
         for layer in layers:
             stats = analyzer.analyze_layer(model_name, capability, layer)
             if stats:
-                stats_list.append(asdict(stats))
-                print(f"  Layer {layer}: Ratio={stats.norm_ratio:.2f}, Rank90={stats.effective_rank_90}")
+                stats_list.append(stats) # Keep as object for plotting
+                print(f"  Layer {layer}: Ratio={stats.norm_ratio:.2f}, Rank90={stats.effective_rank_90}, Sim={stats.avg_pairwise_similarity:.2f}")
+
+    # Plot trend
+    analyzer.plot_similarity_trend(stats_list)
 
     # Save summary stats
     import json
     with open(os.path.join(results_dir, "geometry_stats.json"), "w") as f:
-        json.dump(stats_list, f, indent=2)
+        json.dump([asdict(s) for s in stats_list], f, indent=2)
     print(f"Geometry analysis complete. Saved to {results_dir}")
+
+
