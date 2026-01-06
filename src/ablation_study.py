@@ -136,37 +136,27 @@ class AblationRunner:
         
         # 1. Ablation Hook
         def ablate_hook(module, input, output):
-            # output is typically (hidden_state, present_key_value_tuple) or just hidden_state
-            # We need to change the hidden state.
+            # "Layer Ablation" in a Residual Network (like Transformers) usually means 
+            # removing the layer's contribution, i.e., making it an Identity function.
+            # output = input
+            
+            # input is a tuple (hidden_states, attention_mask, ...)
+            # We return the input hidden_states as the output of this layer.
+            # This preserves the information from previous layers flowing through the residual stream.
+            
+            hs_in = input[0]
+            
+            # Match output format: (hidden_states, ...)
             if isinstance(output, tuple):
-                hs = output[0]
-                rest = output[1:]
+                # We need to return a tuple matching the expected output signature
+                # usually (hidden_states, present_key_value)
+                # We can just return the input hidden state and whatever else was generated 
+                # (or None for KV if we strictly skip, but returning the original output's rest is safer for shape)
+                # actually, if we skip, 'rest' might be garbage or important.
+                # Safest "Skip": Return (hs_in, output[1:])
+                return (hs_in,) + output[1:]
             else:
-                hs = output
-                rest = ()
-            
-            # shape: [Batch, Seq, Dim]
-            # Replace with ablation_value (broadcasted)
-            # ablation_value should be [Dim]
-            
-            # Option A: Replace entire sequence
-            # hs[:] = ablation_value
-            
-            # Option B: Replace ONLY the last token?
-            # Probes are usually trained on the LAST token.
-            # Ablating the last token context is what matters most for the probe.
-            # However, standard ablation usually ablates the position.
-            # Let's ablate EVERYTHING to be sure we kill the information flow.
-            
-            if ablation_value is not None:
-                # Broadcast [Dim] to [Batch, Seq, Dim]
-                # Note: If ablation_value is 0 scalar, it works.
-                curr_dtype = hs.dtype
-                # Ensure device and type
-                val = ablation_value.to(hs.device).type(curr_dtype)
-                hs = torch.zeros_like(hs) + val
-                
-            return (hs,) + rest if isinstance(output, tuple) else hs
+                return hs_in
 
         # 2. Probe Capture Hook
         def capture_hook(module, input, output):
