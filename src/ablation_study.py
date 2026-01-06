@@ -98,30 +98,12 @@ class AblationRunner:
                 texts.append((self._get_input_text(data['user_prompt'], data['negative_response']), 0))
         return texts
 
-    def get_layer_means(self, loader: ActivationLoader, capability: str, context: str, layers: List[int]) -> Dict[int, torch.Tensor]:
-        """
-        Computes (or loads) the mean activation for each layer from the TRAINING set.
-        Used for mean-ablation.
-        """
-        means = {}
-        print(f"Computing layer means for {context}...")
-        for layer in layers:
-            # We use the existing ActivationLoader to load stored training activations
-            X, _ = loader.load_data(capability, context, layer, "train")
-            if len(X) > 0:
-                # X is numpy [N, Dim]. Compute mean.
-                mean_act = np.mean(X, axis=0)
-                means[layer] = torch.tensor(mean_act, dtype=torch.float16, device=self.device)
-            else:
-                # Fallback to zero if no data
-                means[layer] = torch.tensor(0.0, dtype=torch.float16, device=self.device) # Scalar 0 broadcasts? check dim
-        return means
+
 
     def run_ablation_pass(
         self, 
         texts: List[str], 
         ablation_layer: Optional[int], 
-        ablation_value: Optional[torch.Tensor], 
         probe_layer: int
     ) -> np.ndarray:
         """
@@ -338,23 +320,16 @@ def run_ablation_study(
         texts = [x[0] for x in raw_data]
         labels = np.array([x[1] for x in raw_data])
         
-        # Compute Means for all relevant layers in this context
-        # We need means for layers 0...p_layer
-        layers_to_ablate = list(range(0, p_layer + 1)) # Ablate up to probe layer
+        # Compute Means: SKIPPED (Identity Ablation used)
         
-        # Optimization: We only need means for layers we ablate.
-        # We also need to loop through them.
-        layer_means = runner.get_layer_means(loader, cap, ctx, layers_to_ablate)
+        layers_to_ablate = list(range(0, p_layer + 1)) # Ablate up to probe layer
         
         curve = []
         
         for layer_idx in layers_to_ablate:
-            # Get mean for this layer
-            mean_val = layer_means.get(layer_idx)
-            
             # Run Model with Ablation
             # Pass IID data
-            acts = runner.run_ablation_pass(texts, layer_idx, mean_val, p_layer)
+            acts = runner.run_ablation_pass(texts, layer_idx, p_layer)
             
             if len(acts) == 0:
                 curve.append({"layer": layer_idx, "acc": 0.0})
@@ -424,6 +399,44 @@ def plot_ablation_results(results: List[Dict], output_dir: str):
             plt.grid(True, alpha=0.3)
             plt.savefig(os.path.join(output_dir, f"{capability}_ablation_OOD.png"))
             plt.close()
+
+    # Chart 3: COMBINED Summary (All Contexts)
+    # 1. IID Combined
+    plt.figure(figsize=(12, 8))
+    for r in results:
+        if r['type'] != 'IID': continue
+        layers = [x['layer'] for x in r['ablation_curve']]
+        accs = [x['acc'] for x in r['ablation_curve']]
+        # Label format: Cap - Context (Layer)
+        lbl = f"{r['capability'][:4].upper()} - {CONTEXT_LABELS.get(r['train_context'], r['train_context'][:10])} (L{r['target_layer']})"
+        plt.plot(layers, accs, marker='o', alpha=0.7, label=lbl)
+    
+    plt.title("Combined Ablation Impact - ALL IID Probes")
+    plt.xlabel("Ablated Layer")
+    plt.ylabel("Probe Accuracy")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "ALL_CONTEXTS_ablation_IID.png"))
+    plt.close()
+
+    # 2. OOD Combined
+    plt.figure(figsize=(12, 8))
+    for r in results:
+        if r['type'] != 'OOD': continue
+        layers = [x['layer'] for x in r['ablation_curve']]
+        accs = [x['acc'] for x in r['ablation_curve']]
+        lbl = f"{r['capability'][:4].upper()} - {CONTEXT_LABELS.get(r['train_context'], r['train_context'][:10])} (L{r['target_layer']})"
+        plt.plot(layers, accs, marker='x', linestyle='--', alpha=0.7, label=lbl)
+    
+    plt.title("Combined Ablation Impact - ALL OOD Probes")
+    plt.xlabel("Ablated Layer")
+    plt.ylabel("Probe Accuracy")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "ALL_CONTEXTS_ablation_OOD.png"))
+    plt.close()
 
 if __name__ == "__main__":
     import argparse
