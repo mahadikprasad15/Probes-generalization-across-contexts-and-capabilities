@@ -8,11 +8,12 @@ from src.probe_training import train_probes_pipeline
 from src.evaluation import run_evaluation_pipeline
 from src.analysis_geometry import run_geometry_analysis
 from src.interaction_analysis import run_interaction_analysis
+from src.multiclass_analysis import run_multiclass_analysis
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Probes Generalization Pipeline")
     parser.add_argument("--steps", nargs="+", default=["all"],
-                        choices=["generate", "extract", "train", "evaluate", "analyze", "interaction", "all"],
+                        choices=["generate", "extract", "train", "evaluate", "analyze", "interaction", "multiclass", "all"],
                         help="Steps to run")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B-Instruct",
                         help="Model to use for activation extraction (the model being studied)")
@@ -179,6 +180,16 @@ def main():
             base_dir=activations_dir,
             probes_dir=probes_dir,
             results_dir=interaction_dir
+        )
+
+    # 7. Multi-Class Analysis
+    if run_all or "multiclass" in args.steps:
+        multiclass_dir = os.path.join(results_dir, "multiclass")
+        print(f"\n=== Step 7: Multi-Class Analysis (Output: {multiclass_dir}) ===")
+        run_multiclass_analysis(
+            model_name=args.model,
+            base_dir=activations_dir,
+            results_dir=multiclass_dir
         )
 
 if __name__ == "__main__":
