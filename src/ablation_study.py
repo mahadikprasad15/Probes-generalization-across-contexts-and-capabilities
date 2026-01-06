@@ -446,5 +446,8 @@ if __name__ == "__main__":
     run_ablation_study(
         base_dir=args.base_dir,
         model_name=args.model,
-        hf_token=args.hf_token
+        hf_token=args.hf_token,
+        activations_dir=os.path.join(args.base_dir, "data", "activations"),
+        probes_dir=os.path.join(args.base_dir, "probes"),
+        results_dir=os.path.join(args.base_dir, "results", "ablation")
     )
