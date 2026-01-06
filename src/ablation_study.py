@@ -11,6 +11,12 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sklearn.metrics import accuracy_score
 
+import sys
+# Add project root to sys.path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from src.data_types import (
     ContextSpecificProbe, 
     CAPABILITIES, 
