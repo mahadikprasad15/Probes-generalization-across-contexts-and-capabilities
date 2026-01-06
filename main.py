@@ -7,11 +7,12 @@ from src.activation_extraction import ActivationExtractor
 from src.probe_training import train_probes_pipeline
 from src.evaluation import run_evaluation_pipeline
 from src.analysis_geometry import run_geometry_analysis
+from src.interaction_analysis import run_interaction_analysis
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Probes Generalization Pipeline")
     parser.add_argument("--steps", nargs="+", default=["all"],
-                        choices=["generate", "extract", "train", "evaluate", "analyze", "all"],
+                        choices=["generate", "extract", "train", "evaluate", "analyze", "interaction", "all"],
                         help="Steps to run")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B-Instruct",
                         help="Model to use for activation extraction (the model being studied)")
@@ -167,6 +168,17 @@ def main():
             model_name=args.model,
             probes_dir=probes_dir,
             results_dir=geometry_dir
+        )
+
+    # 6. Interaction Analysis
+    if run_all or "interaction" in args.steps:
+        interaction_dir = os.path.join(results_dir, "interaction")
+        print(f"\n=== Step 6: Interaction Analysis (Output: {interaction_dir}) ===")
+        run_interaction_analysis(
+            model_name=args.model,
+            base_dir=activations_dir,
+            probes_dir=probes_dir,
+            results_dir=interaction_dir
         )
 
 if __name__ == "__main__":

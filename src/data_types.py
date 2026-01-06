@@ -39,6 +39,14 @@ class GeneralProbe:
     b: float
 
 @dataclass
+class UnifiedProbe:
+    model_name: str
+    layer: int
+    W: np.ndarray # [d_model]
+    b: float
+    accuracy: float = 0.0
+
+@dataclass
 class ContextProbeEval:
     model_name: str
     capability: str
